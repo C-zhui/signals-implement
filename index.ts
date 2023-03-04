@@ -12,18 +12,19 @@ class Schedule {
   queueIndex = {} as Record<string, EffectNode>;
   queue: EffectNode[] = [];
 
-  run() {
+  /** 按照优先级运行，值越小执行越早 */
+  autoRun() {
     if (!this.queue.length) return;
-
     this.queue.sort((a, b) => -(a.priority - b.priority));
     const node = this.queue.pop();
     log('Schedule run', this, node);
     delete this.queueIndex[node.id];
     node.run();
-    return this.run();
+    return this.autoRun(); // 递归
   }
 
-  add(node: EffectNode) {
+  /** 添加待执行的副作用 */
+  addEffectTask(node: EffectNode) {
     if (this.queueIndex[node.id]) return;
     log('Schedule add', node);
     this.queueIndex[node.id] = node;
@@ -71,7 +72,7 @@ abstract class EffectNode {
     }
   }
 
-  /** 上游释放 */
+  /** 上游依赖释放 */
   release() {
     log('release', this);
     Object.values(this.prev).forEach((prevNode) => {
@@ -88,17 +89,16 @@ abstract class EffectNode {
       .reduce((a, b) => a + b, 0);
   }
 
-  /** 通知下游 */
-  notifyAll() {
+  /** 标脏下游 */
+  dirtyDownstream() {
     log('notifyAll', this);
-    // mark dirty and add to schedule
     Object.values(this.next).forEach((n) => {
       n.dirty = true;
-      schedule.add(n);
+      schedule.addEffectTask(n);
     });
-    schedule.run();
   }
 
+  // 执行之后，脏位重置
   run() {
     this.dirty = false;
   }
@@ -133,7 +133,23 @@ class Signal<T> extends EffectNode {
   set value(v: T) {
     log('Signal set', this);
     this._value = v;
-    this.notifyAll();
+    if (Signal.batchMode) {
+      Signal.batchQueue[this.id] = this;
+    } else {
+      this.dirtyDownstream();
+      schedule.autoRun();
+    }
+  }
+
+  // 批量更新逻辑
+  static batchMode = false;
+  static batchQueue = {} as Record<string, Signal<any>>;
+  static batch(update: () => void) {
+    Signal.batchMode = true;
+    update();
+    Signal.batchMode = false;
+    Object.values(Signal.batchQueue).forEach((n) => n.dirtyDownstream());
+    schedule.autoRun();
   }
 }
 
@@ -174,7 +190,8 @@ class Computed<T> extends EffectNode {
     log('Computed run');
     this._ensureComputed();
     super.run();
-    this.notifyAll();
+    this.dirtyDownstream();
+    schedule.autoRun();
   }
 }
 
@@ -228,9 +245,8 @@ export function createEffect(effect: () => Unsubscribe, manual?: boolean) {
   return new Effect(effect, manual);
 }
 
-export function createStore() {}
-
 const num = createSignal(1);
+const num1 = createSignal(1);
 
 const num2 = createComputed(() => num.value + 1);
 
@@ -239,5 +255,8 @@ createEffect(() => {
 });
 
 setInterval(() => {
-  num.value = num.value + 1;
+  Signal.batch(() => {
+    num.value = num.value + 1;
+    num1.value = num1.value + 1;
+  });
 }, 3000);
